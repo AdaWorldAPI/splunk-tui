@@ -238,6 +238,7 @@ async fn run_send(
         .context("Failed to create HEC client")?;
 
     let response = cancellable!(client.hec_send_event(&hec_url, &hec_token, &event), cancel)?;
+    ensure_hec_accepted(response.code, &response.text)?;
 
     // Format output
     let format = OutputFormat::from_str(output_format)?;
@@ -250,6 +251,12 @@ async fn run_send(
 
     output_result(&output, format, output_file.as_ref())?;
 
+    Ok(())
+}
+
+/// An HTTP 200 with Splunk HEC code!=0 is NOT successful ingestion.
+fn ensure_hec_accepted(code: i32, message: &str) -> Result<()> {
+    anyhow::ensure!(code == 0, "HEC rejected event (code={code}): {message}");
     Ok(())
 }
 
@@ -310,6 +317,7 @@ async fn run_send_batch(
         client.hec_send_batch(&hec_url, &hec_token, &events, ndjson),
         cancel
     )?;
+    ensure_hec_accepted(response.code, &response.text)?;
 
     // Format output
     let format = OutputFormat::from_str(output_format)?;
@@ -498,6 +506,13 @@ fn format_hec_ack_status_table(status: &splunk_client::HecAckStatus) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hec_success_requires_code_zero_even_if_http_was_200() {
+        assert!(ensure_hec_accepted(0, "Success").is_ok());
+        assert!(ensure_hec_accepted(7, "Incorrect index").is_err());
+        assert!(ensure_hec_accepted(4, "Invalid token").is_err());
+    }
 
     #[test]
     fn parses_ndjson_input_without_requiring_a_json_array() {
