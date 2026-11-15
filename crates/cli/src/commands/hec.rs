@@ -253,6 +253,24 @@ async fn run_send(
     Ok(())
 }
 
+/// The input file must match the requested encoding. A NDJSON *wire* flag
+/// does not imply the input is a JSON array (the old implementation did).
+fn parse_hec_event_file(content: &str, ndjson: bool) -> Result<Vec<splunk_client::HecEvent>> {
+    if ndjson {
+        content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(|(line_num, line)| {
+                serde_json::from_str::<splunk_client::HecEvent>(line)
+                    .with_context(|| format!("Invalid HEC NDJSON event at line {}", line_num + 1))
+            })
+            .collect()
+    } else {
+        serde_json::from_str(content).context("Expected a JSON array of HEC events")
+    }
+}
+
 async fn run_send_batch(
     events_file: PathBuf,
     hec_url: String,
@@ -272,7 +290,7 @@ async fn run_send_batch(
     let content = std::fs::read_to_string(&events_file)
         .with_context(|| format!("Failed to read events file: {}", events_file.display()))?;
 
-    let events: Vec<splunk_client::HecEvent> = serde_json::from_str(&content)
+    let events = parse_hec_event_file(&content, ndjson)
         .with_context(|| format!("Invalid JSON in events file: {}", events_file.display()))?;
 
     if events.is_empty() {
@@ -480,6 +498,34 @@ fn format_hec_ack_status_table(status: &splunk_client::HecAckStatus) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_ndjson_input_without_requiring_a_json_array() {
+        let input = concat!(
+            "{\"event\":{\"event_id\":\"entra-01\",\"evidence_grade\":\"fixture\"}}\n",
+            "\n",
+            "{\"event\":{\"event_id\":\"exchange-02\",\"evidence_grade\":\"fixture\"}}\n"
+        );
+        let events = parse_hec_event_file(input, true).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event["event_id"], "entra-01");
+        assert_eq!(events[1].event["event_id"], "exchange-02");
+        assert!(parse_hec_event_file(input, false).is_err());
+    }
+
+    #[test]
+    fn preserves_json_array_mode_and_refuses_malformed_ndjson_line() {
+        let array = r#"[{"event":{"event_id":"a"}},{"event":{"event_id":"b"}}]"#;
+        assert_eq!(parse_hec_event_file(array, false).unwrap().len(), 2);
+        assert!(parse_hec_event_file(array, true).is_err());
+        let err = parse_hec_event_file("{\"event\":1}\nnot-json\n", true).unwrap_err();
+        assert!(format!("{err:#}").contains("line 2"));
+    }
+
+    #[test]
+    fn empty_ndjson_does_not_produce_a_successful_empty_batch() {
+        assert!(parse_hec_event_file("\n  \n", true).unwrap().is_empty());
+    }
 
     #[test]
     fn test_format_hec_response_table_success() {
